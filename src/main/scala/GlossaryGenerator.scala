@@ -96,7 +96,7 @@ class DictApiClient()(implicit val system: ActorSystem = ActorSystem()) {
 }
 
 object EntryPoint extends App with JsonSupport {
-  val apiKey = S.fromFile("key").getLines().mkString
+  val apiKey = scala.util.Properties.envOrNone("DICT_API_KEY").getOrElse(S.fromFile("key").getLines().mkString)
   val originalText = S.fromFile("text.txt").getLines().mkString
 
   implicit val system = ActorSystem()
