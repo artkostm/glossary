@@ -2,7 +2,7 @@
 To generate glossary from any english text with translation to russian.
 
 A few simple steps to have fun:
-* Create API key: https://tech.yandex.com/keys/?service=dict (note that there is a limit: 10000 request per day)
+* Create API key: https://tech.yandex.com/keys/?service=dict (notice that there is a limit: 10000 request per day)
 * In order to avoid unintentional key sharing, do as follows:
   ```bash
   export DICT_API_KEY=<api_key_value>
