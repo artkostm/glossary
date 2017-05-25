@@ -2,6 +2,9 @@
   * Created by artsiom.chuiko on 28/04/2017.
   */
 
+import java.net.URLEncoder
+import java.nio.charset.StandardCharsets
+
 import akka.actor.ActorSystem
 import akka.http.scaladsl.Http
 import akka.http.scaladsl.marshallers.sprayjson.SprayJsonSupport
@@ -27,7 +30,7 @@ case class DictResp(`def`: List[Definition])
 object Utils {
   val emptyString = ""
 
-  def url(term: String, key: String): String = s"/api/v1/dicservice.json/lookup?key=$key&lang=en-ru&text=$term"
+  def url(term: String, key: String): String = s"/api/v1/dicservice.json/lookup?key=$key&lang=en-ru&text=${URLEncoder.encode(term, StandardCharsets.UTF_8.name)}"
 
   def createFormattedLine(resp: DictResp): String =
     resp.`def`.find(d => !StringUtil.isBlank(d.text))
@@ -84,7 +87,7 @@ class DictApiClient()(implicit val system: ActorSystem = ActorSystem()) {
   implicit val materializer = ActorMaterializer()
 
   val pool = Http().cachedHostConnectionPoolHttps[Int]("dictionary.yandex.net")
-
+  
   import com.peoplepattern.text.Implicits._
   def executeFlatten(origText: String, key: String): Future[Iterable[HttpResponse]] =
     Source(origText.terms.map(term => HttpRequest(HttpMethods.GET, uri = Utils.url(term, key))).zipWithIndex.toMap)
