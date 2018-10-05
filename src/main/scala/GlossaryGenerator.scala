@@ -81,10 +81,9 @@ sealed trait ApiError
 case class NotFound(error: String) extends ApiError
 case class UnexpectedStatusCode(status: StatusCode) extends ApiError
 
-class DictApiClient()(implicit val system: ActorSystem = ActorSystem()) {
+class DictApiClient()(implicit val system: ActorSystem, val materializer: ActorMaterializer) {
 
   implicit val dispatcher = system.dispatcher
-  implicit val materializer = ActorMaterializer()
 
   val pool = Http().cachedHostConnectionPoolHttps[Int]("dictionary.yandex.net")
   
@@ -104,7 +103,7 @@ object EntryPoint extends App with JsonSupport {
 
   implicit val system = ActorSystem()
   implicit val dispatcher = system.dispatcher
-  implicit val materializer = ActorMaterializer()
+  implicit val materializer: ActorMaterializer = ActorMaterializer()
 
   val start = System.currentTimeMillis()
   import com.norbitltd.spoiwo.natures.xlsx.Model2XlsxConversions._
