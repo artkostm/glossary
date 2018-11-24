@@ -85,6 +85,7 @@ class DictApiClient()(implicit val system: ActorSystem, val materializer: ActorM
 
   implicit val dispatcher = system.dispatcher
 
+  // verify: https schema
   val pool = Http().cachedHostConnectionPoolHttps[Int]("dictionary.yandex.net")
   
   import com.peoplepattern.text.Implicits._
