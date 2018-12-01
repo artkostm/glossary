@@ -2,26 +2,29 @@
   * Created by artsiom.chuiko on 28/04/2017.
   */
 
+import java.io.IOException
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
+import java.util.Date
 
 import akka.actor.ActorSystem
 import akka.http.scaladsl.Http
 import akka.http.scaladsl.marshallers.sprayjson.SprayJsonSupport
 import akka.http.scaladsl.model._
 import akka.http.scaladsl.unmarshalling.Unmarshal
-import akka.stream.ActorMaterializer
-import akka.stream.scaladsl.Source
+import akka.stream._
+import akka.stream.scaladsl.{Flow, GraphDSL, RunnableGraph, Source}
 import com.norbitltd.spoiwo.model.{Row, Sheet}
 import com.peoplepattern.text.StringUtil
 import spray.json.DefaultJsonProtocol
 
 import scala.collection.immutable.SortedMap
 import scala.collection.mutable.ListBuffer
-import scala.concurrent.{Await, Future}
+import scala.concurrent.{Await, Future, Promise}
 import scala.concurrent.duration.Duration
 import scala.io.{Source => S}
-import scala.util.{Failure, Success}
+import scala.util.{Failure, Success, Try}
+import scala.concurrent.duration._
 
 case class Translation(text: String)
 case class Definition(text: String, pos: Option[String], ts: Option[String], fl: Option[String], tr: List[Translation])
@@ -81,37 +84,72 @@ sealed trait ApiError
 case class NotFound(error: String) extends ApiError
 case class UnexpectedStatusCode(status: StatusCode) extends ApiError
 
-class DictApiClient()(implicit val system: ActorSystem = ActorSystem()) {
+class DictApiClient()(implicit val system: ActorSystem, maaterializer: ActorMaterializer) {
 
   implicit val dispatcher = system.dispatcher
-  implicit val materializer = ActorMaterializer()
 
   val pool = Http().cachedHostConnectionPoolHttps[Int]("dictionary.yandex.net")
-  
-  import com.peoplepattern.text.Implicits._
-  def executeFlatten(origText: String, key: String): Future[Iterable[HttpResponse]] =
-    Source(origText.terms.map(term => HttpRequest(HttpMethods.GET, uri = Utils.url(term, key))).zipWithIndex.toMap)
+
+  def translate(tokens: List[String], apiKey: String) = Source.fromGraph(GraphDSL.create() { implicit builder =>
+    import GraphDSL.Implicits._
+
+    val tokenSource = Source(tokens)
+
+    val toHttpRequest = Flow[String].map(token => HttpRequest(HttpMethods.GET, uri = Utils.url(token, apiKey)))
+
+    val withPromise = Flow[HttpRequest].map((_, Promise[DictResp]))
+
+    val httpsPool = Http().cachedHostConnectionPoolHttps[Promise[DictResp]]("dictionary.yandex.net")
+
+
+    tokenSource ~> toHttpRequest ~> withPromise ~> httpsPool
+    SourceShape(Source(tokens).shape.out)
+  })
+
+  //import com.peoplepattern.text.Implicits._
+  def executeFlatten(origText: String, key: String): Future[Iterable[HttpResponse]] = {
+    val tt = origText.split("\n").flatMap(_.split(" "))
+    println(tt.toList)
+    Source.fromIterator(() => tt.map(term => HttpRequest(HttpMethods.GET, uri = Utils.url(term, key))).zipWithIndex.toIterator)
+    //.throttle(1, 3.second, 2, ThrottleMode.Shaping)
+    //.via(Flow[(HttpRequest, Int)].map(tpl => {println(tpl._1); tpl}))
       .via(pool)
+      //.via(Flow[(Try[HttpResponse], Int)].map(tpl => {println(tpl._1); tpl}))
+      //.throttle(1, 3.second, 2, ThrottleMode.Shaping)
       .runFold(SortedMap[Int, Future[HttpResponse]]()) {
         case (m, (Success(r), idx)) => m + (idx -> Future.successful(r))
         case (m, (Failure(e), idx)) => m + (idx -> Future.failed(e))
-      }.flatMap(r => Future.sequence(r.values))
+      }.flatMap(r => {println(r);Future.sequence(r.values)})
+  }
 }
 
 object EntryPoint extends App with JsonSupport {
+  val lineSeparator = sys.props("line.separator")
   val apiKey = scala.util.Properties.envOrNone("DICT_API_KEY").getOrElse(S.fromFile("key").getLines().mkString)
-  val originalText = S.fromFile("text.txt").getLines().mkString
+  val originalText = S.fromFile("text.txt").getLines().mkString(lineSeparator)
 
+  val decider: Supervision.Decider = {
+    case error: Throwable =>
+      error.printStackTrace()
+      Supervision.Stop
+  }
   implicit val system = ActorSystem()
   implicit val dispatcher = system.dispatcher
-  implicit val materializer = ActorMaterializer()
+  implicit val materializer = ActorMaterializer(ActorMaterializerSettings(system).withSupervisionStrategy(decider))
 
   val start = System.currentTimeMillis()
   import com.norbitltd.spoiwo.natures.xlsx.Model2XlsxConversions._
   val result = for {
     responses <- new DictApiClient().executeFlatten(originalText, apiKey)
-    dictionaryResponse <- Future.traverse(responses)(response => Unmarshal(response.entity).to[DictResp])
-  } yield Sheet(
+    dictionaryResponse <- Future.traverse(responses)(response => {println(response);Unmarshal(response.entity).to[DictResp].recoverWith {
+      case ex =>
+        Unmarshal(response.entity).to[String].flatMap { body =>
+          Future.failed(new IOException(s"Failed to unmarshal with ${ex.getMessage} and response body is\n $body"))
+        }
+    }})
+  } yield {
+    println(dictionaryResponse)
+    Sheet(
     name = "glossary", rows = dictionaryResponse.map(Utils.createFormattedLine)
       .filter(line => !StringUtil.isBlank(line))
       .toList.sorted
@@ -119,14 +157,17 @@ object EntryPoint extends App with JsonSupport {
       .map(lineWithIndex => lineWithIndex._1.split(";") match {
         case Array(text, ts, tr) => Row().withCellValues(lineWithIndex._2 + 1, text, ts, tr)
       }).toList
-  ).saveAsXlsx("glossary.xlsx")
+  ).saveAsXlsx(s"glossary-${new Date().getTime}.xlsx")}
 
   result.onComplete {
-    case Success(_) => println(s"Done! Time: ${System.currentTimeMillis() - start}")
-    case Failure(e) => e.printStackTrace()
+    case Success(_) =>
+      println(s"Done! Time: ${System.currentTimeMillis() - start}")
+      system.terminate()
+    case Failure(e) =>
+      system.terminate()
+      e.printStackTrace()
   }
 
-  Await.result(result, Duration.Inf)
-  Await.result(system.terminate(), Duration.Inf)
+  Await.result(system.whenTerminated, 1 minute)
 }
 
